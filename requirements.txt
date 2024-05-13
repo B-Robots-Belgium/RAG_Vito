@@ -1,6 +1,4 @@
 datasets==2.18.0
-haystack-ai==2.0.0
-sentence-transformers>=2.2.0
 pandas==2.2.2
 python-dotenv==1.0.1
 streamlit==1.32.2

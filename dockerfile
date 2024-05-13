@@ -1,7 +1,7 @@
 # app/Dockerfile
 
 # Set base image
-FROM python:3.10
+FROM deepset/haystack-cpu
 
 # Set working directory
 WORKDIR /app
