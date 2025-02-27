@@ -1,0 +1,11 @@
+{
+    "main_structuur_navigator": {
+        "url": "https://ws.navigator.emis.vito.be/milnav-rest-api/v1.0/index/6289/versies/1753-01-01/structuur?volledig=true"
+    },
+    "boek_navigator": {
+        "url": "https://ws.navigator.emis.vito.be/milnav-rest-api/v1.0/boek/"
+    }, 
+    "artikel_navigator": {
+        "url": "https://ws.navigator.emis.vito.be/milnav-rest-api/v1.0/artikel/"
+    }
+}
