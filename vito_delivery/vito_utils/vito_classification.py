@@ -8,11 +8,15 @@ from .utils import (
 from .keyword_utils import (
     calculate_weighted_keyword_similarity, 
     print_overlapping_keywords)
+from .vito_llm import classify_with_langchain
 from .vito_classes import VitoArticle, VitoBoek
 import pandas as pd
 import psycopg2
+import logging
 
 from .api_calls import retrieve_artikel, retrieve_boek_from_artikel
+
+logger = logging.getLogger(__name__)
 
 def move_label_up(assigned_labels, highest_label, current_label_path, hierarchical_labels):
     assigned_labels.append(highest_label.split('\\')[-1])
@@ -30,7 +34,14 @@ def move_label_up(assigned_labels, highest_label, current_label_path, hierarchic
         allowed_labels = []
     return current_label_path, allowed_labels
 
-def assign_labels_a_star(testArticle: VitoArticle, PgVectorConn, max_depth: int = 3) -> list:
+def assign_labels_a_star(
+    testArticle: VitoArticle, 
+    PgVectorConn, 
+    max_depth: int = 3,
+    initial_item_amount: int = 5,
+    semantic_item_amount: int = 5,
+    include_label_threshold: float = 0.9,
+    multiple_label_threshold: float = 0.95) -> list:
     """
     Assigns labels to the test_article using an A* search algorithm.
     Collects detailed information during the process.
@@ -44,7 +55,7 @@ def assign_labels_a_star(testArticle: VitoArticle, PgVectorConn, max_depth: int 
     ep = 1e-10  
 
     # Start by querying the top-level items
-    initial_items = get_top_similar_items(PgVectorConn, testArticle.embedding, 5)
+    initial_items = get_top_similar_items(PgVectorConn, testArticle.embedding, initial_item_amount)
     # Convert initial items to a DataFrame
     initial_df = pd.DataFrame(initial_items, columns=['artikel', 'chunk', 'weighted_keywords', 'labels', 'score'])
     initial_df['labels'] = initial_df['labels'].apply(parse_pg_array)
@@ -65,24 +76,24 @@ def assign_labels_a_star(testArticle: VitoArticle, PgVectorConn, max_depth: int 
 
     initial_df['extra_context_score'] = 0.0
 
-    for idx, row in initial_df.iterrows():
-        article_id = str(row['artikel'])
+    # for idx, row in initial_df.iterrows():
+    #     article_id = str(row['artikel'])
 
-        try:
-            artikel_data = retrieve_artikel(article_id)
+    #     try:
+    #         artikel_data = retrieve_artikel(article_id)
 
-            boek_id = artikel_data['metadata'][0]['href'].split('/')[-1]
+    #         boek_id = artikel_data['metadata'][0]['href'].split('/')[-1]
 
-            linked_boek = VitoBoek(retrieve_boek_from_artikel(boek_id))
+    #         linked_boek = VitoBoek(retrieve_boek_from_artikel(boek_id))
 
-            linked_boek.get_boek_info()
+    #         linked_boek.get_boek_info()
 
-            print("Boek samenvatting: " + linked_boek.samenvatting + "\n")
-            print("Boek titel: " + linked_boek.titel + "\n")
+    #         print("Boek samenvatting: " + linked_boek.samenvatting + "\n")
+    #         print("Boek titel: " + linked_boek.titel + "\n")
 
-        except Exception as e:
-            print(f"Error retrieving or processing data for artikel {article_id}: {e}")
-            continue
+    #     except Exception as e:
+    #         print(f"Error retrieving or processing data for artikel {article_id}: {e}")
+    #         continue
 
     # Calculate initial combined scores
     initial_df['combined_score'] = alpha_initial * initial_df['weight'] + beta_initial * initial_df['keyword_score']
@@ -115,20 +126,29 @@ def assign_labels_a_star(testArticle: VitoArticle, PgVectorConn, max_depth: int 
     for label in label_scores:
         mean_score = sum(label_scores[label]) / len(label_scores[label])
         label_mean_scores[label] = mean_score
-        print(f"\nLabel: {label}, Mean Score: {mean_score}")
+        logging.info(f"\nLabel: {label}, Mean Score: {mean_score}")
 
-    # Select only the label with the highest mean score at level 0 or take all top labels
+    # Determine candidate labels based on threshold
     sorted_labels = sorted(label_mean_scores.items(), key=lambda x: x[1], reverse=True)
-    for idx, label in enumerate(sorted_labels):
-        top_label = sorted_labels[0][0]
-        mean_score = label_mean_scores[top_label]
-        df_filtered = label_dfs[top_label]
-
-        # Add initial paths to the queue
+    top_mean_score = sorted_labels[0][1]
+    threshold = top_mean_score * include_label_threshold
+    candidate_labels = [label for label, score in sorted_labels if score >= threshold]
+    logging.info(f"\nCandidate Labels: {candidate_labels}")
+    
+    # Apply LLM fallback if multiple candidate labels exist at the lowest level
+    if len(candidate_labels) > 1:
+        selected_label = classify_with_langchain(testArticle.inhoud, candidate_labels)
+        candidate_labels = [selected_label]
+    
+    # Initialize the queue with the selected candidate(s)
+    queue = deque()
+    for label in candidate_labels:
+        mean_score = label_mean_scores[label]
+        df_filtered = label_dfs[label]
         queue.append({
-            'path': [top_label],
+            'path': [label],
             'mean_score': mean_score,
-            'level': 1,
+            'level': 1,   # subsequent processing will use level 1 and up
             'df': df_filtered
         })
 
@@ -161,16 +181,16 @@ def assign_labels_a_star(testArticle: VitoArticle, PgVectorConn, max_depth: int 
                 label_combined_scores[label] = max(label_combined_scores.get(label, 0), combined_score)
                 label_dfs[label] = pd.concat([label_dfs[label], row.to_frame().T], ignore_index=True)
         
-        print(f"\nLabel scores for level {level}: {label_scores}")
+        logging.info(f"\nLabel scores for level {level}: {label_scores}")
         if label_scores:
             # Calculate mean scores for labels at current level
             label_mean_scores = {}
             for label in label_scores:
                 mean_score = sum(label_scores[label]) / len(label_scores[label])
                 label_mean_scores[label] = mean_score
-                print(f"Label: {label}, mean Score: {mean_score:.4f}")
+                logging.info(f"Label: {label}, mean Score: {mean_score:.4f}")
         else:
-            print("No further labels at this level.")
+            logging.info("No further labels at this level.")
             # Since there are no further labels, we can append the current path
             assigned_labels.append({
                 'path': path,
@@ -186,55 +206,51 @@ def assign_labels_a_star(testArticle: VitoArticle, PgVectorConn, max_depth: int 
             })
             continue
 
-        # For levels beyond the first, include labels within a % of the top score
-        if level == 1:
-            # At first level, only select the label with the highest mean score
-            sorted_labels = sorted(label_mean_scores.items(), key=lambda x: x[1], reverse=True)
-            top_label = sorted_labels[0][0]
-            top_mean_score = sorted_labels[0][1]
-            top_labels = [top_label]
-        else:
-            # For other levels, include labels within a % threshold
-            sorted_labels = sorted(label_mean_scores.items(), key=lambda x: x[1], reverse=True)
-            top_mean_score = sorted_labels[0][1]
-            threshold = top_mean_score * 0.80
-            top_labels = [label for label, score in sorted_labels if score >= threshold]
-
+        # Use thresholding and apply LLM fallback if ambiguity exists (this now applies to every level)
+        sorted_labels = sorted(label_mean_scores.items(), key=lambda x: x[1], reverse=True)
+        top_mean_score = sorted_labels[0][1]
+        threshold = top_mean_score * include_label_threshold
+        candidate_labels = [label for label, score in sorted_labels if score >= threshold]
+        if len(candidate_labels) > 1:
+            selected_label = classify_with_langchain(testArticle.inhoud, candidate_labels)
+            candidate_labels = [selected_label]
+        top_labels = candidate_labels
+    
+        # Process each selected label from this level
         for label in top_labels:
             new_path = path + [label]
             new_mean_score = label_mean_scores[label]
             new_df = label_dfs[label]
-
-            # Re-query to get new DataFrame for the next level
+    
             current_label_path = "\\".join(new_path)
-            print(f"Re-querying with label path: {current_label_path}")
+            logging.info(f"Re-querying with label path: {current_label_path}")
             
-            new_items = query_sematically_alike_items(PgVectorConn, testArticle.embedding, current_label_path, top_n=5*level)
-
+            new_items = query_sematically_alike_items(
+                PgVectorConn, 
+                testArticle.embedding, 
+                current_label_path, 
+                top_n=semantic_item_amount*level)
+    
             if not new_items or level + 1 >= max_depth:
-                # No further items, assign labels
                 assigned_labels.append({
                     'path': new_path,
                     'mean_score': new_mean_score
                 })
                 continue
-
-            # Convert new items to a DataFrame
+    
             new_df = pd.DataFrame(new_items, columns=['artikel', 'chunk', 'weighted_keywords', 'labels', 'score'])
             new_df['labels'] = new_df['labels'].apply(parse_pg_array)
             new_df['distance'] = 1 - new_df['score']
             new_df['weight'] = 1 / (new_df['score'] + ep)
-
-            # Calculate keyword scores again for new query results
+    
             new_df['keyword_score'] = new_df['weighted_keywords'].apply(
                 lambda article_keywords: calculate_weighted_keyword_similarity(
-                    test_weighted_keywords, article_keywords
+                    testArticle.weighted_keywords, article_keywords
                 )
             )
-
-            # Calculate combined scores for new items
+    
             new_df['combined_score'] = alpha * new_df['weight'] + beta * new_df['keyword_score']
-
+    
             queue.append({
                 'path': new_path,
                 'mean_score': new_mean_score,
@@ -242,24 +258,23 @@ def assign_labels_a_star(testArticle: VitoArticle, PgVectorConn, max_depth: int 
                 'df': new_df
             })
 
-
     # After the search, select the paths with the highest scores
     assigned_labels = sorted(assigned_labels, key=lambda x: x['mean_score'], reverse=True)
 
      # Determine the threshold for including multiple labels
     if assigned_labels:
         top_mean_score = assigned_labels[0]['mean_score']
-        threshold = top_mean_score * 0.90
+        threshold = top_mean_score * multiple_label_threshold
 
-        # Collect all paths whose mean score is within 5% of the top score
-        print("Assigned Label for top mean score: " + str(top_mean_score))
+        # Collect all paths whose mean score is within n% of the top score
+        logging.info("Assigned Label for top mean score: " + str(top_mean_score))
         final_labels = [item['path'] for item in assigned_labels if item['mean_score'] >= threshold]
     else:
         final_labels = []
 
     # Print the assigned labels with their mean scores
-    print("\nAssigned Labels with mean scores:")
+    logging.info("\nAssigned Labels with mean scores:")
     for item in assigned_labels:
-        print(f"Labels: {item['path']}, Mean Score: {item['mean_score']:.4f}")
+        logging.info(f"Labels: {item['path']}, Mean Score: {item['mean_score']:.4f}")
 
     return final_labels, assigned_labels

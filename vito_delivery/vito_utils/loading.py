@@ -1,5 +1,6 @@
 import os
 import json
+import random
 from vito_utils.vito_classes import VitoArticle
 
 def load_text_from_folder(folder_path):
@@ -106,3 +107,76 @@ def get_hierarchical_labels_from_folder(root_folder):
         hierarchical_labels[relative_path] = dirnames
 
     return hierarchical_labels
+
+def is_leaf_directory(dir_path):
+    """Return True if 'dir_path' has no subdirectories."""
+    for entry in os.scandir(dir_path):
+        if entry.is_dir():
+            return False
+    return True
+
+
+def get_leaf_directories(base_folder):
+    """
+    Recursively walk through 'base_folder' to find all the leaf directories (i.e., 
+    directories that have no subdirectories).
+    """
+    leaf_dirs = []
+    for root, dirs, _ in os.walk(base_folder):
+        if not dirs:
+            leaf_dirs.append(root)
+    return leaf_dirs
+
+
+def get_unique_articles_from_folders_with_split(folders, comparison_folder, test_ratio=0.2, seed=42) -> list[VitoArticle]:
+    """
+    1. Find all leaf folders in 'folders'.
+    2. Load all articles from each leaf folder, filtering out duplicates found in 'comparison_folder'.
+    3. Shuffle and split each leaf folder’s articles into train/test at 80:20 (by default).
+    
+    :param folders: List of folder paths to scan for articles.
+    :param comparison_folder: Folder path whose articles are considered "already known".
+    :param test_ratio: The fraction of leaf-folder articles to reserve for testing (default 0.2).
+    :param seed: Random seed for reproducible shuffling.
+    :return: (train_articles, test_articles) as lists of VitoArticle objects.
+    """
+
+    # Load articles from the comparison folder as a set of artikel strings
+    comparison_articles = set(load_text_from_folder(comparison_folder))
+
+    # Prepare final containers
+    train_articles = []
+    test_articles = []
+
+    random.seed(seed)  # for reproducible splits
+
+    # For each folder that we want to process
+    for folder in folders:
+        # Find all leaf directories in this folder
+        leaf_dirs = get_leaf_directories(folder)
+
+        for leaf_dir in leaf_dirs:
+            # Load all VitoArticles from this leaf directory
+            leaf_articles = load_articles_from_folder(leaf_dir)
+
+            # Filter out articles that exist in the comparison folder (by 'artikel' text)
+            new_leaf_articles = [
+                a for a in leaf_articles 
+                if a.artikel not in comparison_articles
+            ]
+
+            # Shuffle them (so splitting is random)
+            random.shuffle(new_leaf_articles)
+
+            # Compute split index
+            split_index = int(len(new_leaf_articles) * (1 - test_ratio))
+
+            # 80% => DB, 20% => test (by default)
+            leaf_train = new_leaf_articles[:split_index]
+            leaf_test = new_leaf_articles[split_index:]
+
+            # Add them to the global lists
+            train_articles.extend(leaf_train)
+            test_articles.extend(leaf_test)
+
+    return train_articles, test_articles

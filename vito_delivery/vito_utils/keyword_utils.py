@@ -1,8 +1,12 @@
 from collections import defaultdict
+import logging
 from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer
+from .db_actions import get_top_similar_items
 
-model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+model_name = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+#paraphrase-multilingual-mpnet-base-v2
+#all-mpnet-base-v2
 sentence_model = SentenceTransformer(model_name)
 kw_model = KeyBERT(model_name)
 
@@ -21,16 +25,16 @@ def print_overlapping_keywords(stage, path, test_keywords, articles_df):
         Details of each article including article ID, labels, semantic similarity, combined score,
         test and article keywords, and any overlapping keywords found.
     """
-    print("---------------------------------------------------------------------------")
-    print(f"\nStage {stage}, Level: {' > '.join(path) if path else 'Initial items'}")
+    logging.info("---------------------------------------------------------------------------")
+    logging.info(f"\nStage {stage}, Level: {' > '.join(path) if path else 'Initial items'}")
     for idx, row in articles_df.iterrows():
         article_keywords = row['weighted_keywords']
-        print(f"\nArticle ID: {row['artikel']}")
-        print(f"Labels: {row['labels']}")
-        print(f"Semantic similarity: {row['weight']}")
-        print(f"Combined score: {row['combined_score']}\n")
-        print("Test Article Keywords:", test_keywords)
-        print("Article Keywords:", list(article_keywords.keys()))
+        logging.info(f"\nArticle ID: {row['artikel']}")
+        logging.info(f"Labels: {row['labels']}")
+        logging.info(f"Semantic similarity: {row['weight']}")
+        logging.info(f"Combined score: {row['combined_score']}\n")
+        logging.info("Test Article Keywords: %s", test_keywords)
+        logging.info("Article Keywords: %s", list(article_keywords.keys()))
 
         overlapping_keywords = []
 
@@ -53,13 +57,13 @@ def print_overlapping_keywords(stage, path, test_keywords, articles_df):
                     break  
 
         if overlapping_keywords:
-            print("Overlapping Keywords:")
+            logging.info("Overlapping Keywords:")
             for overlap in overlapping_keywords:
-                print(f"Test Keyword: '{overlap['test_keyword']}', "
+                logging.info(f"Test Keyword: '{overlap['test_keyword']}', "
                       f"Article Keyword: '{overlap['article_keyword']}', "
                       f"Article Keyword Weight: {overlap['article_weight']}")
         else:
-            print("No overlapping keywords.")
+            logging.info("No overlapping keywords.")
 
 def calculate_weighted_keyword_similarity(test_keywords, article_keywords, similarity = 0.0):
     """
@@ -189,3 +193,39 @@ def extract_keybert_keywords(text: str, top_n: int=10, ngram_range=(1, 3), stop_
         use_mmr=use_mmr,                   
         diversity=diversity
     )
+
+def seed_keybert_with_similar_docs(conn, new_doc_text, new_doc_embedding, artikel_id):
+    """
+    1. Retrieve top-N similar documents (already stored in DB) for 'new_doc_embedding'.
+    2. Gather their keywords as 'seed_keywords'.
+    3. Use KeyBERT with 'seed_keywords' to generate new keywords for the new doc.
+    4. Update DB with the new doc's keywords.
+    """
+    top_similar = get_top_similar_items(conn, new_doc_embedding, top_n=5)
+
+    seed_keywords = set()
+    for row in top_similar:
+        weighted_kw = row[2]  
+        if weighted_kw:
+            # If weighted_kw is a dict => keys are the keywords
+            if isinstance(weighted_kw, dict):
+                for kw in weighted_kw.keys():
+                    seed_keywords.add(kw)
+            else:
+                # If it's a list of strings or something else, adapt accordingly
+                # e.g.: for kw in weighted_kw: seed_keywords.add(kw)
+                pass
+
+    # Extract keywords from the new document with KeyBERT, seeding with the top-similar docs' keywords
+    new_keywords_scored = kw_model.extract_keywords(
+        new_doc_text,
+        top_n=10,
+        keyphrase_ngram_range=(1, 3),
+        stop_words= ['en', 'van', 'de', 'een', 'het', 'dat', 'of', 'is', 'die', 'in', 'als', 'om'],
+        use_mmr=True,
+        diversity=0.8,
+        seed_keywords=list(seed_keywords)
+    )
+    new_keywords_weighted = [{kw[0]: kw[1]} for kw in new_keywords_scored]
+
+    return new_keywords_scored, new_keywords_weighted

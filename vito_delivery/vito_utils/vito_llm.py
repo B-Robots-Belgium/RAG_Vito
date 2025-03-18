@@ -1,12 +1,15 @@
 import psycopg2
 import openai
-from utils import clean_html
+import os
+from .utils import clean_html
 from .vito_classes import VitoArticle
-from db_actions import get_top_similar_items
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.llms import OpenAI
-from langchain.chains import RetrievalQA
-from langchain.vectorstores import PGVector
+from .langchain_classes import WetboekFormulier, create_examples_and_messages
+from .db_actions import get_top_similar_items
+from langchain.chat_models import init_chat_model 
+from langchain_openai import ChatOpenAI
+from langchain.chains import LLMChain
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
+from langchain_community.callbacks import get_openai_callback
 
 def UploadOpenAI(text: str, client):
     response = client.chat.completions.create(
@@ -25,51 +28,85 @@ def UploadOpenAI(text: str, client):
         ])
     return response
 
-def classify_with_langchain(article: VitoArticle, connection_string: str, collection_name: str = "vito_articles"):
-    """
-    Classifies an article using retrieval (stored in PostgreSQL / pgvector) and GPT when necessary.
-
-    :param article: A VitoArticle instance.
-    :param connection_string: Your PostgreSQL connection string, e.g. "postgresql+psycopg2://user:pass@host:5432/dbname"
-    :param collection_name: The name of the pgvector collection/table where embeddings are stored.
-    :return: The classification result returned by the RetrievalQA chain.
-    """
-    embeddings = OpenAIEmbeddings()
-
-    vectorstore = PGVector(
-        connection_string=connection_string,
-        embedding_function=embeddings,
-        collection_name=collection_name
+def classify_with_langchain(text: str, candidate_labels: list, ) -> str:
+    llm = ChatOpenAI(
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        temperature=0,
+        model_name="gpt-4o"
     )
 
-    retriever = vectorstore.as_retriever()
+    classification_prompt = PromptTemplate(
+        input_variables=["text", "labels"],
+        template="""
+        You are given a piece of text:
+        ---
+        {text}
+        ---
 
-    llm = OpenAI(model_name="gpt-4o")
-    qa = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",        
-        retriever=retriever
+        You have these possible labels to choose from:
+        {labels}
+
+        Pick exactly one label from the above list that best fits the text, and output only that label (without explanation). 
+                """,
+            )
+
+    # Build an LLMChain that uses the prompt above
+    chain = classification_prompt | llm
+
+    # Run the chain with text and candidate labels
+    candidate_str = ", ".join(candidate_labels)
+    llm_output = chain.invoke(
+        {
+            "text": text,
+            "labels": candidate_str
+        })
+    print(llm_output)
+    # The LLM output should be exactly one of the provided labels
+    chosen_label = llm_output.text().strip()
+    return chosen_label
+
+def extract_with_langchain(article: VitoArticle) -> dict:
+    LLM_client = init_chat_model(
+        model="gpt-4-0125-preview",
+        model_provider="openai",
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        temperature=0
+    ) 
+
+    # Define the prompt template
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                ""
+            ),
+            MessagesPlaceholder("examples"), 
+            ("human", "{text}")
+        ]
     )
 
-    response = qa.run(f"Classify the following article: {clean_html(article.inhoud)}")
-    return response
+    messages = create_examples_and_messages()
 
+    # Create structured output handling
+    runnable = prompt | LLM_client.with_structured_output(
+        schema=WetboekFormulier,
+        method="function_calling",
+        include_raw=False,
+    )
+    # + "\n" + article.inhoud
+    text = "Article name: " + article.artikel + "\n" + article.inhoud
 
-def process_article(json_file, openai_client, faiss_index):
-    """Processes a new article: extracts keywords, updates embedding, and classifies."""
-    article = VitoArticle(json_file)
-    article.extract_keywords()
-    article.update_embedding(openai_client)
-    
-    # Perform retrieval to find similar articles
-    similar_articles = get_top_similar_items(psycopg2.connect(
-        database="postgres",
-        user="postgres",
-        password="yourpassword"), article.embedding, 5)
-    
-    if not similar_articles or max([sim[2] for sim in similar_articles]) < 0.7:
-        classification = classify_with_langchain(article, faiss_index)
-    else:
-        classification = [sim[3] for sim in similar_articles]
-    
-    return article, classification
+    try:
+        with get_openai_callback() as cb:
+            response = runnable.invoke(
+                {
+                    "text": text,
+                    "examples": messages
+                }
+            )
+
+    except Exception as e:
+        print(f"Error during extraction with Azure OpenAI: {e}")
+        return None
+
+    return response, cb

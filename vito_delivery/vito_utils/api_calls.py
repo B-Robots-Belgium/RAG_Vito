@@ -101,6 +101,7 @@ def retrieve_boek_from_artikel(boek_id: str):
 
 if __name__ == "__main__":
     print("Running file as main file. Testing API calls...")
+    print(10 * '-')
     artikel = retrieve_artikel("44412")
     boek_id = artikel['metadata'][0]['href'].split('/')[-1]
     boek = VitoBoek(retrieve_boek_from_artikel(boek_id))

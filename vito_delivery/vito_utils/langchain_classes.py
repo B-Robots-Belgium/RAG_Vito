@@ -9,13 +9,9 @@ class WetsartikelReferentie(BaseModel):
     Een referentie naar een specifiek wetsartikel dat in de tekst wordt genoemd.
     Voorbeeld: 'Art. 5, paragraaf 3 van het Milieuwetboek.'
     """
-    artikel_id: Optional[str] = Field(
+    artikel_nummer: Optional[str] = Field(
         ...,
         description="De ID of het nummer van het genoemde wetsartikel (bijv. 'Art. 5' of '53475')."
-    )
-    artikel_tekst: Optional[str] = Field(
-        ...,
-        description="De letterlijke tekstpassage waarin dit wetsartikel wordt vermeld."
     )
 
 class WetboekHeader(BaseModel):
@@ -41,10 +37,6 @@ class WetboekFormulier(BaseModel):
     Een gestructureerde weergave van een wettekst, inclusief verwijzingen
     naar andere wetsartikelen of codes.
     """
-    header: Optional[WetboekHeader] = Field(
-        ...,
-        description="De basisinformatie over deze wettekst."
-    )
     referenties: List[WetsartikelReferentie] = Field(
         default_factory=list,
         description="Een lijst met alle in de tekst genoemde wetsartikelen."
@@ -53,44 +45,43 @@ class WetboekFormulier(BaseModel):
         ...,
         description="Een korte samenvatting of parafrase van de wettekst."
     )
+    is_addendum: bool = Field(
+        ...,
+        description="Boolean die aangeeft of deze tekst een bijlage/extra is (True) of een eigenlijke wettekst (False)."
+    )
+    top_level: Optional[str] = Field(
+        ...,
+        description="This is the classification of the actual article. The classification is in Dutch and from the given options.",
+        enum=['Handhaving', 'Stoffen', 'Compartiment']
+    )
 
 class Example(TypedDict):
     input: str
     tool_calls: List[BaseModel]
 
-def tool_example_to_messages(input_text: str, model_obj: BaseModel) -> List[BaseMessage]:
-    """
-    Convert a text string plus a Pydantic model into a list of messages
-    that can be fed into a language model via LangChain.
-
-    The idea is:
-      1. The user provides text (HumanMessage).
-      2. The AI “calls a tool” by returning a structured object (AIMessage with tool_calls).
-      3. We then optionally add a ToolMessage to simulate a response from that tool.
-    """
-    messages: List[BaseMessage] = [HumanMessage(content=input_text)]
-
-    tool_call_id = str(uuid.uuid4())
-    messages.append(
-        AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "id": tool_call_id,
-                    "args": model_obj.dict(),
-                    "name": model_obj.__class__.__name__,
-                }
-            ],
+def tool_example_to_messages(example: Example) -> List[BaseMessage]:
+    """Convert an example into a list of messages that can be fed into a language model."""
+    messages: List[BaseMessage] = [HumanMessage(content=example["input"])]
+    tool_calls = []
+    
+    for tool_call in example["tool_calls"]:
+        tool_calls.append(
+            {
+                "id": str(uuid.uuid4()),
+                "args": tool_call.dict(),
+                "name": tool_call.__class__.__name__,
+            },
         )
-    )
-
-    messages.append(
-        ToolMessage(
-            content="Tool successfully received the structured data.",
-            tool_call_id=tool_call_id,
-        )
-    )
-
+    
+    messages.append(AIMessage(content="", tool_calls=tool_calls))
+    
+    tool_outputs = example.get("tool_outputs") or [
+        "You have correctly called this tool."
+    ] * len(tool_calls)
+    
+    for output, tool_call in zip(tool_outputs, tool_calls):
+        messages.append(ToolMessage(content=output, tool_call_id=tool_call["id"]))
+    
     return messages
 
 
@@ -99,36 +90,36 @@ def create_examples_and_messages() -> List[BaseMessage]:
     Builds an example set of messages demonstrating how a user-supplied law-text 
     might be transformed into a structured object with references to other articles.
     """
-    example_law_text = (
-    "Volgens het Vlaamse Milieuwetboek (editie 2025) bepaalt artikel 53475 de reikwijdte van afvalbeheer. "
-    "Daarnaast verduidelijkt Art. 12bis de beroepsprocedure. Deze tekst is gepubliceerd op 2025-02-10."
-)
-
-    law_document_example = WetboekFormulier(
-        header=WetboekHeader(
-            naam_wetboek="VLAREM",
-            editie="2025",
-            publicatiedatum="2025-02-10"
-        ),
-        referenties=[
-            WetsartikelReferentie(
-                artikel_id="53475",
-                artikel_tekst="artikel 53475 bepaalt de reikwijdte van afvalbeheer"
-            ),
-            WetsartikelReferentie(
-                artikel_id="12bis",
-                artikel_tekst="Art. 12bis verduidelijkt de beroepsprocedure"
-            ),
-        ],
-        samenvatting=(
-            "Een wettekst over de reikwijdte van afvalbeheer en beroepsprocedures, "
-            "met verwijzing naar twee artikelen."
+    
+    examples = [
+        (
+            "Volgens het Vlaamse Milieuwetboek (editie 2025) bepaalt artikel 53475 de reikwijdte van afvalbeheer. Daarnaast verduidelijkt Art. 12bis de beroepsprocedure. Deze tekst is gepubliceerd op 2025-02-10.",
+            WetboekFormulier(
+                referenties=[
+                    WetsartikelReferentie(
+                        artikel_nummer="art 5.3.4.7.5"
+                    ),
+                    WetsartikelReferentie(
+                        artikel_nummer="12bis"
+                    ),
+                ],
+                is_addendum=False,
+                samenvatting=(
+                    "Een wettekst over de reikwijdte van afvalbeheer en beroepsprocedures, "
+                    "met verwijzing naar twee artikelen."
+                ),
+                top_level="Stoffen"
+            )
         )
-    )
+    ]
 
-    example_messages = tool_example_to_messages(
-        input_text=example_law_text,
-        model_obj=law_document_example
-    )
+    messages = []
 
-    return example_messages
+    for text, tool_call in examples:
+        messages.extend(
+            tool_example_to_messages(
+                {"input": text, "tool_calls": [tool_call]}
+            )
+        )
+
+    return messages
